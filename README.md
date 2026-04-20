@@ -13,6 +13,24 @@
 [![NPM version](https://img.shields.io/npm/v/@honcho-ai/sdk.svg)](https://npmjs.org/package/@honcho-ai/sdk)
 [![Discord](https://img.shields.io/discord/1016845111637839922?style=flat&logo=discord&logoColor=23ffffff&label=Plastic%20Labs&labelColor=235865F2)](https://discord.gg/honcho)
 
+> **⚠️ This is `baba-yu/nunc-honcho`, a hermes-stack fork of `plastic-labs/honcho`.**
+>
+> Local modifications on top of upstream:
+> - Gatekeeper classifier columns (`queue.status`, `queue.gate_verdict`, etc.) — new migration `g7h8i9j0k1l2`
+> - Vector columns ALTER'd from 1536-dim (upstream) to 768-dim to match `nomic-embed-text` — new migration `h8i9j0k1l2m3`
+> - Peer-filtered deriver prompt (`src/deriver/prompts.py`, `src/deriver/deriver.py`) — prevents AI-peer hallucinations from becoming memory about human peers
+> - `supersede_observations` tool in `src/utils/agent_tools.py` — deriver retracts observations on user correction
+> - Status-aware queue filter in `src/deriver/queue_manager.py` — only `status IN ('ready','revived')` rows are picked up
+> - Relaxed vector-dim validator in `src/config.py` — upstream forbids any `EMBEDDING.VECTOR_DIMENSIONS != 1536` under pgvector; the fork accepts non-1536 dims once `vector_store.MIGRATED=true` is set (needed for 768-dim Nomic embeddings)
+>
+> **Before first `docker compose up`:** copy the Bonsai-tuned config template:
+> ```bash
+> cp config.toml.bonsai-example config.toml
+> ```
+> This is required because upstream Honcho's `.gitignore` excludes `config.toml` (it's meant to be per-deployment). The `config.toml.bonsai-example` file is tracked in this fork as the canonical hermes-stack starting point (Bonsai-8B primary, no cloud fallback, `FLUSH_ENABLED=true`, `REPRESENTATION_BATCH_MAX_TOKENS=200`, 768-dim vectors).
+>
+> See the surrounding [hermes-stack](../../) repo for the full deployment story (Bonsai build, Ollama embedding alias, hermes agent wiring).
+
 Honcho is an open source memory library with a managed service for building stateful
 agents. Use it with any model, framework, or architecture. It enables agents to build
 and maintain state about any entity--users, agents, groups, ideas, and more. And because

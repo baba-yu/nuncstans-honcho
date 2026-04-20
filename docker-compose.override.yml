@@ -1,0 +1,11 @@
+services:
+  api:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  deriver:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+  database:
+    ports: !reset []
+  redis:
+    ports: !reset []
