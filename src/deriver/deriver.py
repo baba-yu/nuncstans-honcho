@@ -1,12 +1,14 @@
 import logging
 import time
 
+from sqlalchemy import select
+
 from src import crud
 from src.config import ConfiguredModelSettings, settings
 from src.crud.representation import RepresentationManager
 from src.dependencies import tracked_db
 from src.llm import honcho_llm_call
-from src.models import Message
+from src.models import Message, QueueItem
 from src.schemas import ResolvedConfiguration
 from src.telemetry import prometheus_metrics
 from src.telemetry.events import RepresentationCompletedEvent, emit
@@ -17,6 +19,7 @@ from src.telemetry.prometheus.metrics import (
     TokenTypes,
 )
 from src.telemetry.sentry import with_sentry_transaction
+from src.utils.agent_tools import TOOLS, create_tool_executor
 from src.utils.config_helpers import get_configuration
 from src.utils.formatting import format_new_turn_with_timestamp
 from src.utils.representation import PromptRepresentation, Representation
@@ -91,10 +94,36 @@ async def process_representation_tasks_batch(
         "id",
     )
 
-    # Format messages with timestamps
-    formatted_messages = "\n".join(
+    # Split messages by authorship: the `observed` peer's own messages are the
+    # only evidence source; everyone else (including AI chat agents whose
+    # hallucinated "I remember you are X" lines would otherwise seed false
+    # memories) goes in a separate context block the prompt explicitly tells
+    # the LLM not to extract from.
+    target_msgs = [m for m in messages if m.peer_name == observed]
+    context_msgs = [m for m in messages if m.peer_name != observed]
+
+    if not target_msgs:
+        logger.info(
+            "Deriver batch for %s contains no messages authored by the observed peer; "
+            "skipping extraction (messages %s:%s in %s/%s)",
+            observed,
+            earliest_message.id,
+            latest_message.id,
+            latest_message.workspace_name,
+            latest_message.session_name,
+        )
+        return
+
+    target_formatted = "\n".join(
         format_new_turn_with_timestamp(msg.content, msg.created_at, msg.peer_name)
-        for msg in messages
+        for msg in target_msgs
+    )
+    context_formatted = (
+        "\n".join(
+            format_new_turn_with_timestamp(msg.content, msg.created_at, msg.peer_name)
+            for msg in context_msgs
+        )
+        or "(no other-peer messages in this window)"
     )
 
     # Track token usage - count only tokens from messages being processed
@@ -112,7 +141,11 @@ async def process_representation_tasks_batch(
     )
 
     # Build prompt
-    prompt = minimal_deriver_prompt(peer_id=observed, messages=formatted_messages)
+    prompt = minimal_deriver_prompt(
+        peer_id=observed,
+        target_assertions=target_formatted,
+        context_messages=context_formatted,
+    )
 
     context_prep_duration = (time.perf_counter() - overall_start) * 1000
     accumulate_metric(
@@ -225,7 +258,7 @@ async def process_representation_tasks_batch(
         accumulate_metric(
             f"minimal_deriver_{latest_message.id}_{observed}",
             "messages",
-            formatted_messages,
+            f"TARGET:\n{target_formatted}\n\nCONTEXT:\n{context_formatted}",
             "blob",
         )
         # Log actual observations created as blob metrics
@@ -256,3 +289,129 @@ async def process_representation_tasks_batch(
             output_tokens=response.output_tokens,
         )
     )
+
+    # Gatekeeper-driven supersede pass. If any queue row flagged its message as
+    # correction_of_prior, fire a secondary, tool-only LLM call so Bonsai can
+    # soft-delete the now-contradicted observations. We run AFTER the main save
+    # so the new observation already exists alongside the old ones at the moment
+    # the model chooses which IDs to retract.
+    if queue_item_message_ids:
+        correction_mids = await _fetch_correction_message_ids(queue_item_message_ids)
+        if correction_mids:
+            correction_messages = [m for m in messages if m.id in correction_mids]
+            if correction_messages:
+                try:
+                    await _run_supersede_pass(
+                        correction_messages=correction_messages,
+                        workspace_name=latest_message.workspace_name,
+                        session_name=latest_message.session_name,
+                        observers=observers,
+                        observed=observed,
+                    )
+                except Exception as e:  # noqa: BLE001
+                    logger.warning(
+                        "Supersede pass failed for message(s) %s: %s",
+                        sorted(correction_mids),
+                        e,
+                    )
+
+
+async def _fetch_correction_message_ids(
+    queue_item_message_ids: list[int],
+) -> set[int]:
+    """Return the subset of queue_item_message_ids whose gate_verdict marks
+    them as correction_of_prior=true."""
+    async with tracked_db("deriver.check_corrections") as db:
+        result = await db.execute(
+            select(QueueItem.message_id, QueueItem.gate_verdict).where(
+                QueueItem.message_id.in_(queue_item_message_ids)
+            )
+        )
+        return {
+            mid
+            for mid, verdict in result.all()
+            if mid is not None
+            and isinstance(verdict, dict)
+            and verdict.get("correction_of_prior") is True
+        }
+
+
+async def _run_supersede_pass(
+    correction_messages: list[Message],
+    workspace_name: str,
+    session_name: str,
+    observers: list[str],
+    observed: str,
+) -> None:
+    """Secondary LLM pass that lets the deriver retract observations contradicted
+    by an explicit user correction.
+
+    Runs once per observer (each observer holds an independent copy of the
+    peer's observations). Restricted to the ``supersede_observations`` tool to
+    keep this pass strictly about retraction — no new observations, no peer
+    card edits.
+    """
+    correction_text = "\n".join(m.content for m in correction_messages)
+    supersede_tools = [TOOLS["supersede_observations"]]
+    deriver_model_config = _get_deriver_model_config()
+
+    for observer in observers:
+        async with tracked_db("deriver.supersede.fetch_recent") as db:
+            documents = await crud.query_documents_recent(
+                db=db,
+                workspace_name=workspace_name,
+                observer=observer,
+                observed=observed,
+                limit=30,
+            )
+            # Materialize id + content while the session is open; Document
+            # instances become detached once the `async with` block exits.
+            obs_rows: list[tuple[str, str]] = [(d.id, d.content) for d in documents]
+        if not obs_rows:
+            continue
+
+        obs_block = "\n".join(
+            f"- {doc_id} :: {content}" for doc_id, content in obs_rows
+        )
+
+        prompt = (
+            "You keep a peer's memory accurate.\n\n"
+            f"The peer ({observed}) just posted a CORRECTION:\n"
+            f'"""\n{correction_text}\n"""\n\n'
+            "Here are their existing observations. Each line is formatted as "
+            "`<observation_id> :: <content>`. The observation_id is the exact "
+            "string before the ` :: ` separator — pass it verbatim to the tool, "
+            "with no prefix or brackets.\n\n"
+            f"{obs_block}\n\n"
+            "Identify observations that are now directly CONTRADICTED by the "
+            "correction (e.g. a prior name/location/profession claim that the "
+            "correction explicitly revises). Call supersede_observations ONCE "
+            "with a list of the raw observation_ids to retract and a short "
+            "reason. Do NOT supersede observations that are merely topically "
+            "related but not contradicted. If nothing needs retracting, reply "
+            'with "no supersede needed" and do not call any tool.'
+        )
+
+        tool_executor = await create_tool_executor(
+            workspace_name=workspace_name,
+            observer=observer,
+            observed=observed,
+            session_name=session_name,
+            agent_type="deriver",
+            parent_category="deriver.supersede",
+        )
+
+        await honcho_llm_call(
+            model_config=deriver_model_config,
+            prompt=prompt,
+            max_tokens=512,
+            tools=supersede_tools,
+            tool_choice="auto",
+            tool_executor=tool_executor,
+            max_tool_iterations=2,
+            track_name="Deriver Supersede Pass",
+            temperature=deriver_model_config.temperature,
+            enable_retry=True,
+            retry_attempts=2,
+            trace_name="deriver_supersede",
+        )
