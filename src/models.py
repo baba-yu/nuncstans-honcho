@@ -16,6 +16,7 @@ from sqlalchemy import (
     Identity,
     Index,
     Integer,
+    SmallInteger,
     Table,
     UniqueConstraint,
     text,
@@ -278,7 +279,7 @@ class MessageEmbedding(Base):
         BigInteger, Identity(), primary_key=True, autoincrement=True
     )
     content: Mapped[str] = mapped_column(TEXT)
-    embedding: MappedColumn[Any] = mapped_column(Vector(1536), nullable=True)
+    embedding: MappedColumn[Any] = mapped_column(Vector(768), nullable=True)
     message_id: Mapped[str] = mapped_column(
         ForeignKey("messages.public_id", ondelete="CASCADE"), nullable=False, index=True
     )
@@ -386,7 +387,7 @@ class Document(Base):
     times_derived: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("1")
     )
-    embedding: MappedColumn[Any] = mapped_column(Vector(1536), nullable=True)
+    embedding: MappedColumn[Any] = mapped_column(Vector(768), nullable=True)
     source_ids: Mapped[list[str] | None] = mapped_column(
         JSONB, nullable=True, server_default=text("NULL")
     )
@@ -496,6 +497,20 @@ class QueueItem(Base):
     message_id: Mapped[int | None] = mapped_column(
         BigInteger, ForeignKey("messages.id"), nullable=True
     )
+    # Gatekeeper state — added by migration g7h8i9j0k1l2. Existing rows are
+    # backfilled to 'ready' so the pre-gatekeeper world keeps working.
+    status: Mapped[str] = mapped_column(
+        TEXT, nullable=False, server_default=text("'pending'"), index=True
+    )
+    gate_verdict: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB, nullable=True
+    )
+    gate_decided_at: Mapped[datetime.datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    reclassify_count: Mapped[int] = mapped_column(
+        SmallInteger, nullable=False, server_default=text("0")
+    )
 
     __table_args__ = (
         Index(
@@ -508,6 +523,17 @@ class QueueItem(Base):
             "work_unit_key",
             "processed",
             "id",
+        ),
+        Index(
+            "ix_queue_pending_session",
+            "session_id",
+            "id",
+            postgresql_where=text("status = 'pending' AND processed = false"),
+        ),
+        Index(
+            "ix_queue_demoted_decided_at",
+            "gate_decided_at",
+            postgresql_where=text("status = 'demoted'"),
         ),
         # Partial unique index for reconciler task deduplication
         Index(

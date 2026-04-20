@@ -209,6 +209,9 @@ def create_representation_record(
         "task_type": "representation",
         "workspace_name": workspace_name,
         "message_id": message_id,
+        # New representation items wait for the gatekeeper classifier before
+        # deriver picks them up. See migration g7h8i9j0k1l2 and sleep_daemon.
+        "status": "pending",
     }
 
 
@@ -250,6 +253,8 @@ def create_summary_record(
         "task_type": "summary",
         "workspace_name": workspace_name,
         "message_id": message_id,
+        # Summary tasks bypass gatekeeper — they're system-originated.
+        "status": "ready",
     }
 
 
@@ -428,6 +433,8 @@ def create_dream_record(
         "task_type": "dream",
         "workspace_name": workspace_name,
         "message_id": None,
+        # Dreams bypass gatekeeper — system-originated consolidation.
+        "status": "ready",
     }
 
 
@@ -577,6 +584,8 @@ def create_deletion_record(
         "task_type": "deletion",
         "workspace_name": workspace_name,
         "message_id": None,
+        # Deletions bypass gatekeeper — system-originated cleanup.
+        "status": "ready",
     }
 
 

@@ -252,6 +252,8 @@ class ReconcilerScheduler:
                 task_type="reconciler",
                 workspace_name=None,
                 message_id=None,
+                # Reconciler bypasses gatekeeper — system-originated sync.
+                status="ready",
             )
             db.add(queue_item)
             try:
