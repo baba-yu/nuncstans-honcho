@@ -5,6 +5,7 @@ from .collection import (
 )
 from .deriver import get_deriver_status, get_queue_status
 from .document import (
+    SupersedeStatus,
     create_documents,
     create_observations,
     delete_document,
@@ -18,6 +19,7 @@ from .document import (
     query_documents_most_derived,
     query_documents_recent,
     query_external_vector_document_ids,
+    supersede_document,
 )
 from .message import (
     create_messages,
@@ -82,6 +84,7 @@ __all__ = [
     "get_deriver_status",
     "get_queue_status",
     # Document
+    "SupersedeStatus",
     "create_documents",
     "create_observations",
     "fetch_documents_by_ids",
@@ -95,6 +98,7 @@ __all__ = [
     "query_external_vector_document_ids",
     "delete_document",
     "delete_document_by_id",
+    "supersede_document",
     # Message
     "create_messages",
     "get_messages",

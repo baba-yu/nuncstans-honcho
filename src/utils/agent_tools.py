@@ -657,6 +657,33 @@ TOOLS: dict[str, dict[str, Any]] = {
             "required": ["observation_ids"],
         },
     },
+    "supersede_observations": {
+        "name": "supersede_observations",
+        "description": (
+            "Mark old observations as superseded by a new observation from the "
+            "current message. Use this when the user explicitly corrects or "
+            "retracts a previously stated fact (e.g., 'Actually, I moved to "
+            "Osaka, not Kyoto'). The listed observations will be soft-deleted "
+            "and annotated with a supersede_reason / superseded_by link so the "
+            "history can still be inspected. Prefer this over delete_observations "
+            "whenever the removal is driven by a correction rather than cleanup."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "document_ids_to_supersede": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "List of existing observation/document IDs that the new observation supersedes",
+                },
+                "reason": {
+                    "type": "string",
+                    "description": "Short explanation of why these observations are being superseded (e.g., 'user corrected location to Osaka')",
+                },
+            },
+            "required": ["document_ids_to_supersede", "reason"],
+        },
+    },
     "finish_consolidation": {
         "name": "finish_consolidation",
         "description": "Signal that consolidation is complete. Call this when you have finished your consolidation work and are ready to stop. You MUST call this tool when done - do not keep exploring indefinitely.",
@@ -702,6 +729,8 @@ TOOLS: dict[str, dict[str, Any]] = {
 }
 
 # Tools for the dialectic agent (analysis)
+# NOTE: supersede_observations is intentionally excluded — it is a deriver-only
+# tool for handling user corrections during memory formation.
 DIALECTIC_TOOLS: list[dict[str, Any]] = [
     TOOLS["search_memory"],
     TOOLS["search_messages"],
@@ -720,7 +749,24 @@ DIALECTIC_TOOLS_MINIMAL: list[dict[str, Any]] = [
     TOOLS["search_messages"],
 ]
 
+# Tools for the deriver agent (memory formation from incoming messages).
+# supersede_observations lives here — and ONLY here — so that the deriver can
+# handle user corrections ("Actually, I moved to Osaka, not Kyoto") by
+# soft-deleting superseded observations while recording the linkage.
+DERIVER_TOOLS: list[dict[str, Any]] = [
+    TOOLS["create_observations"],
+    TOOLS["update_peer_card"],
+    TOOLS["get_recent_history"],
+    TOOLS["search_memory"],
+    TOOLS["get_observation_context"],
+    TOOLS["search_messages"],
+    TOOLS["supersede_observations"],
+]
+
 # Tools for the dreamer agent (consolidation + peer card + deduplication)
+# NOTE: supersede_observations is intentionally excluded — supersede is tied to
+# message-processing context, whereas the dreamer uses delete_observations for
+# deduplication/cleanup.
 DREAMER_TOOLS: list[dict[str, Any]] = [
     # Preference extraction (should be called first)
     TOOLS["extract_preferences"],
@@ -744,6 +790,7 @@ DREAMER_TOOLS: list[dict[str, Any]] = [
 # Creates deductive observations from explicit observations, can delete duplicates
 # Includes message access for context and self-directed exploration
 # Note: get_peer_card is not included - peer card is injected into the prompt directly
+# Note: supersede_observations is intentionally excluded (deriver-only).
 DEDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
     # Discovery tools
     TOOLS["get_recent_observations"],
@@ -759,6 +806,7 @@ DEDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
 # Creates inductive observations from explicit and deductive observations
 # Includes message access for context and self-directed exploration
 # Note: get_peer_card is not included - peer card is injected into the prompt directly
+# Note: supersede_observations is intentionally excluded (deriver-only).
 INDUCTION_SPECIALIST_TOOLS: list[dict[str, Any]] = [
     # Discovery tools
     TOOLS["get_recent_observations"],
@@ -1807,7 +1855,12 @@ async def _handle_get_peer_card(ctx: ToolContext, tool_input: dict[str, Any]) ->
 async def _handle_delete_observations(
     ctx: ToolContext, tool_input: dict[str, Any]
 ) -> str:
-    """Handle delete_observations tool."""
+    """Handle delete_observations tool.
+
+    Writes ``internal_metadata.deleted_reason = "deleted"`` on each affected
+    document so supersede-driven removals (``"superseded"``) can later be
+    distinguished from generic cleanup deletions without schema changes.
+    """
     observation_ids = tool_input.get("observation_ids", [])
     if not observation_ids:
         return "ERROR: observation_ids list is empty"
@@ -1822,6 +1875,7 @@ async def _handle_delete_observations(
                     document_id=obs_id,
                     observer=ctx.observer,
                     observed=ctx.observed,
+                    deleted_reason="deleted",
                 )
                 deleted_count += 1
             except Exception as e:
@@ -1843,6 +1897,101 @@ async def _handle_delete_observations(
         )
 
     return f"Deleted {deleted_count} observations"
+
+
+async def _handle_supersede_observations(
+    ctx: ToolContext, tool_input: dict[str, Any]
+) -> str:
+    """Handle supersede_observations tool.
+
+    Soft-deletes each listed document and records a supersede_by / supersede_reason
+    link in ``internal_metadata``. Returns a JSON-like summary with three
+    buckets so callers can distinguish which IDs succeeded, which were missing,
+    and which were already deleted.
+
+    This handler is exposed only via :data:`DERIVER_TOOLS`. Exposing it to
+    dialectic / dreamer would mix memory-formation semantics with query /
+    consolidation semantics.
+    """
+    import json
+
+    raw_ids_value = tool_input.get("document_ids_to_supersede", [])
+    reason = tool_input.get("reason", "")
+
+    if not isinstance(raw_ids_value, list) or not raw_ids_value:
+        return "ERROR: document_ids_to_supersede list is empty"
+
+    raw_ids: list[Any] = cast(list[Any], raw_ids_value)
+
+    # Coerce to strings and drop any empty entries up-front.
+    ids: list[str] = [str(i) for i in raw_ids if str(i).strip()]
+    if not ids:
+        return "ERROR: document_ids_to_supersede contained no valid IDs"
+
+    if not isinstance(reason, str) or not reason.strip():
+        return "ERROR: reason is required and must be a non-empty string"
+    reason = reason.strip()
+
+    # The forward link (new document id) is set by the observation-creation
+    # path when available. Leaving it blank here is fine — the back-link from
+    # old -> new is still recorded, and the new document's source_ids/metadata
+    # can record the reverse link on creation.
+    superseded_by = ""
+
+    superseded: list[str] = []
+    not_found: list[str] = []
+    already_deleted: list[str] = []
+    errors: list[str] = []
+
+    async with ctx.db_lock, tracked_db("tool.supersede_observations") as db:
+        for doc_id in ids:
+            try:
+                status = await crud.supersede_document(
+                    db,
+                    workspace_name=ctx.workspace_name,
+                    document_id=doc_id,
+                    observer=ctx.observer,
+                    observed=ctx.observed,
+                    superseded_by=superseded_by,
+                    reason=reason,
+                )
+            except Exception as e:
+                logger.warning("Failed to supersede observation %s: %s", doc_id, e)
+                errors.append(doc_id)
+                continue
+
+            if status == crud.SupersedeStatus.SUPERSEDED:
+                superseded.append(doc_id)
+            elif status == crud.SupersedeStatus.NOT_FOUND:
+                not_found.append(doc_id)
+            elif status == crud.SupersedeStatus.ALREADY_DELETED:
+                already_deleted.append(doc_id)
+            else:
+                # Defensive: treat unknown statuses as errors.
+                errors.append(doc_id)
+
+    if superseded and ctx.run_id and ctx.agent_type and ctx.parent_category:
+        emit(
+            AgentToolConclusionsDeletedEvent(
+                run_id=ctx.run_id,
+                iteration=get_current_iteration(),
+                parent_category=ctx.parent_category,
+                agent_type=ctx.agent_type,
+                workspace_name=ctx.workspace_name,
+                observer=ctx.observer,
+                observed=ctx.observed,
+                conclusion_count=len(superseded),
+            )
+        )
+
+    payload: dict[str, list[str]] = {
+        "superseded": superseded,
+        "not_found": not_found,
+        "already_deleted": already_deleted,
+    }
+    if errors:
+        payload["errors"] = errors
+    return json.dumps(payload)
 
 
 async def _handle_finish_consolidation(
@@ -2019,6 +2168,7 @@ _TOOL_HANDLERS: dict[str, Callable[[ToolContext, dict[str, Any]], Any]] = {
     "get_session_summary": _handle_get_session_summary,
     "get_peer_card": _handle_get_peer_card,
     "delete_observations": _handle_delete_observations,
+    "supersede_observations": _handle_supersede_observations,
     "finish_consolidation": _handle_finish_consolidation,
     "extract_preferences": _handle_extract_preferences,
     "get_reasoning_chain": _handle_get_reasoning_chain,
