@@ -1270,12 +1270,22 @@ class AppSettings(HonchoSettings):
         if "NAMESPACE" not in self.METRICS.model_fields_set:
             self.METRICS.NAMESPACE = self.NAMESPACE
 
-        if self.EMBEDDING.VECTOR_DIMENSIONS != 1536 and (
-            self.VECTOR_STORE.TYPE == "pgvector" or not self.VECTOR_STORE.MIGRATED
+        # hermes-stack fork: the upstream guard forbade any VECTOR_DIMENSIONS != 1536
+        # whenever TYPE == "pgvector", but our self-hosted deployment runs pgvector
+        # with 768-dim embeddings from nomic-embed-text (aliased to
+        # `openai/text-embedding-3-small` on Ollama). The `h8i9j0k1l2m3` migration
+        # flips the documents / message_embeddings columns to Vector(768) during
+        # schema bootstrap, and VECTOR_STORE.MIGRATED=true signals that alignment
+        # is complete. We relax the guard so it only fires when the vector store
+        # hasn't yet been migrated — i.e., any non-1536 dimension is accepted once
+        # MIGRATED=true, regardless of TYPE.
+        if (
+            self.EMBEDDING.VECTOR_DIMENSIONS != 1536
+            and not self.VECTOR_STORE.MIGRATED
         ):
             raise ValueError(
-                "EMBEDDING.VECTOR_DIMENSIONS must remain 1536 while pgvector is "
-                + "active or vector-store migration is incomplete"
+                "EMBEDDING.VECTOR_DIMENSIONS must remain 1536 while the "
+                + "vector-store migration is incomplete"
             )
 
         return self

@@ -270,6 +270,13 @@ class QueueManager:
 
         async with tracked_db("get_available_work_units") as db:
             representation_prefix = "representation:"
+            # Only consider rows the gatekeeper has cleared (or that bypassed
+            # it entirely). `ready` = gatekeeper said A wins or this is a
+            # system-originated task. `revived` = previously demoted but
+            # promoted back. `pending` rows wait for gatekeeper or the
+            # sleep_daemon to re-evaluate; `demoted` rows never become work.
+            ready_statuses = ("ready", "revived")
+
             token_stats_subq = (
                 select(
                     models.QueueItem.work_unit_key,
@@ -280,6 +287,7 @@ class QueueManager:
                     models.QueueItem.message_id == models.Message.id,
                 )
                 .where(~models.QueueItem.processed)
+                .where(models.QueueItem.status.in_(ready_statuses))
                 .where(models.QueueItem.work_unit_key.startswith(representation_prefix))
                 .group_by(models.QueueItem.work_unit_key)
                 .subquery()
@@ -288,6 +296,7 @@ class QueueManager:
             work_units_subq = (
                 select(models.QueueItem.work_unit_key)
                 .where(~models.QueueItem.processed)
+                .where(models.QueueItem.status.in_(ready_statuses))
                 .group_by(models.QueueItem.work_unit_key)
                 .subquery()
             )

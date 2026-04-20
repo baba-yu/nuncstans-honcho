@@ -607,23 +607,28 @@ async def delete_document(
     observer: str,
     observed: str,
     session_name: str | None = None,
+    deleted_reason: str | None = None,
 ) -> None:
-    """
-    Soft-delete a document by ID.
+    """Soft-delete a document by ID.
 
-    Sets deleted_at timestamp to mark the document as deleted. The reconciliation
-    job handles vector store cleanup and hard deletion from the database.
+    Sets ``deleted_at`` to mark the document as deleted. The reconciliation job
+    handles vector store cleanup and hard deletion from the database. When
+    ``deleted_reason`` is provided, it is merged into the document's
+    ``internal_metadata`` under the ``deleted_reason`` key so consumers can
+    later distinguish generic deletions from supersede-driven removals.
 
     Args:
-        db: Database session
-        workspace_name: Name of the workspace
-        document_id: ID of the document to delete
-        observer: Name of the observing peer (for authorization)
-        observed: Name of the observed peer (for authorization)
-        session_name: Optional session name to verify document belongs to session
+        db: Database session.
+        workspace_name: Name of the workspace.
+        document_id: ID of the document to delete.
+        observer: Name of the observing peer (for authorization).
+        observed: Name of the observed peer (for authorization).
+        session_name: Optional session name to verify document belongs to session.
+        deleted_reason: Optional free-form reason to record in
+            ``internal_metadata.deleted_reason``.
 
     Raises:
-        ResourceNotFoundException: If document not found or doesn't match criteria
+        ResourceNotFoundException: If document not found or doesn't match criteria.
     """
     conditions = [
         models.Document.id == document_id,
@@ -635,9 +640,17 @@ async def delete_document(
     if session_name is not None:
         conditions.append(models.Document.session_name == session_name)
 
-    update_stmt = (
-        update(models.Document).where(*conditions).values(deleted_at=func.now())
-    )
+    values: dict[str, Any] = {"deleted_at": func.now()}
+    if deleted_reason is not None:
+        # JSONB concatenation merges the new key into existing metadata.
+        values["internal_metadata"] = models.Document.internal_metadata.op("||")(
+            cast(
+                Any,
+                func.jsonb_build_object("deleted_reason", deleted_reason),
+            )
+        )
+
+    update_stmt = update(models.Document).where(*conditions).values(**values)
     result = cast(CursorResult[Any], await db.execute(update_stmt))
 
     if result.rowcount == 0:
@@ -684,6 +697,103 @@ async def delete_document_by_id(
         )
 
     await db.commit()
+
+
+class SupersedeStatus:
+    """Enumerated outcomes for a single supersede attempt."""
+
+    SUPERSEDED: str = "superseded"
+    NOT_FOUND: str = "not_found"
+    ALREADY_DELETED: str = "already_deleted"
+
+
+async def supersede_document(
+    db: AsyncSession,
+    workspace_name: str,
+    document_id: str,
+    *,
+    observer: str,
+    observed: str,
+    superseded_by: str = "",
+    reason: str = "",
+) -> str:
+    """Soft-delete a document and record supersede linkage metadata.
+
+    This is functionally similar to :func:`delete_document` but semantically
+    distinct: it records that the document was replaced by a newer observation
+    rather than simply removed. The reconciliation job still handles vector
+    store cleanup and hard deletion downstream.
+
+    The function distinguishes three cases so callers can report per-id
+    outcomes: successfully superseded, not found in the workspace, or already
+    soft-deleted. It never raises for a missing / already-deleted document.
+
+    Args:
+        db: Database session.
+        workspace_name: Workspace the document belongs to.
+        document_id: ID of the document to supersede.
+        observer: Observer peer name (for authorization).
+        observed: Observed peer name (for authorization).
+        superseded_by: ID of the replacement observation. May be empty when the
+            caller cannot provide one; the forward link is expected to be
+            filled in by the observation-creation path.
+        reason: Short explanation of why this document is being superseded.
+
+    Returns:
+        One of :class:`SupersedeStatus` values indicating the outcome.
+    """
+    # Look up the row irrespective of deleted_at so we can distinguish
+    # "not found" from "already deleted" for the caller.
+    existing_stmt = select(models.Document.deleted_at).where(
+        models.Document.id == document_id,
+        models.Document.workspace_name == workspace_name,
+        models.Document.observer == observer,
+        models.Document.observed == observed,
+    )
+    existing = (await db.execute(existing_stmt)).first()
+    if existing is None:
+        return SupersedeStatus.NOT_FOUND
+    if existing[0] is not None:
+        return SupersedeStatus.ALREADY_DELETED
+
+    # Merge supersede metadata into internal_metadata via JSONB concatenation.
+    merged_metadata = models.Document.internal_metadata.op("||")(
+        cast(
+            Any,
+            func.jsonb_build_object(
+                "superseded_by",
+                superseded_by,
+                "supersede_reason",
+                reason,
+                "deleted_reason",
+                "superseded",
+            ),
+        )
+    )
+
+    update_stmt = (
+        update(models.Document)
+        .where(
+            models.Document.id == document_id,
+            models.Document.workspace_name == workspace_name,
+            models.Document.observer == observer,
+            models.Document.observed == observed,
+            models.Document.deleted_at.is_(None),
+        )
+        .values(
+            deleted_at=func.now(),
+            internal_metadata=merged_metadata,
+        )
+    )
+    result = cast(CursorResult[Any], await db.execute(update_stmt))
+
+    if result.rowcount == 0:
+        # Extremely unlikely race: row was deleted between the SELECT and the
+        # UPDATE. Treat as already-deleted rather than error.
+        return SupersedeStatus.ALREADY_DELETED
+
+    await db.commit()
+    return SupersedeStatus.SUPERSEDED
 
 
 async def create_observations(

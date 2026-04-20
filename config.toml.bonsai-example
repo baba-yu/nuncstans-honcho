@@ -1,0 +1,234 @@
+# Honcho config for the hermes-stack (gatekeeper fork) — Bonsai + local Ollama
+#
+# Copy to config.toml before `docker compose up` (this file is tracked as a
+# template because upstream Honcho .gitignore-s config.toml).
+#
+#   cp config.toml.bonsai-example config.toml
+#
+# This template assumes the full hermes-stack deployment:
+#   * Bonsai-8B served via llama-server on host at :8080 (OpenAI-compat)
+#   * Ollama on host at :11434 for embeddings (nomic-embed-text aliased to
+#     `openai/text-embedding-3-small`)
+#   * 768-dim vector store (matches Nomic's output), enforced by the
+#     `h8i9j0k1l2m3` migration that follows upstream's Vector(1536) creation
+#   * No external cloud LLM fallback — each [X.model_config] points at Bonsai
+#     via `overrides.base_url`, and OPENAI_API_KEY is set to the placeholder
+#     "not-needed" (llama-server ignores the value but refuses empty strings)
+#
+# Upstream moved LLM settings from flat `[deriver] PROVIDER/MODEL` fields to
+# nested `[X.model_config]` sub-tables with `transport` / `model` keys, plus
+# optional `[X.model_config.overrides]` with `base_url` / `api_key_env`.
+# This file uses the new schema.
+#
+# Hyperparameters tuned for the hermes-stack use-case — see
+# `hermes-stack/README.md` "Critical hyperparameters" for rationale:
+#   * REPRESENTATION_BATCH_MAX_TOKENS = 200 + FLUSH_ENABLED = true so that
+#     short chat turns fire the gatekeeper/deriver pipeline
+#   * MAX_EMBEDDING_TOKENS = 2048 to match Nomic's native context
+#   * MAX_INPUT_TOKENS / MAX_OUTPUT_TOKENS sized for Bonsai's 16k KV cache
+
+[app]
+LOG_LEVEL = "INFO"
+SESSION_OBSERVERS_LIMIT = 10
+GET_CONTEXT_MAX_TOKENS = 100000
+MAX_FILE_SIZE = 5242880
+MAX_MESSAGE_SIZE = 25000
+EMBED_MESSAGES = true
+MAX_EMBEDDING_TOKENS = 2048
+NAMESPACE = "honcho"
+
+[db]
+CONNECTION_URI = "postgresql+psycopg://honcho:honcho@database:5432/honcho"
+SCHEMA = "public"
+POOL_SIZE = 10
+MAX_OVERFLOW = 20
+POOL_TIMEOUT = 30
+POOL_RECYCLE = 300
+
+[auth]
+USE_AUTH = false
+
+[cache]
+ENABLED = true
+URL = "redis://redis:6379/0?suppress=true"
+DEFAULT_TTL_SECONDS = 300
+
+# ---------------------------------------------------------------------------
+# LLM
+#   llama-server requires a non-empty OPENAI_API_KEY even though it ignores
+#   the value. The per-module `overrides.base_url` points each subsystem at
+#   the Bonsai/Ollama endpoints on the host.
+# ---------------------------------------------------------------------------
+[llm]
+DEFAULT_MAX_TOKENS = 2500
+OPENAI_API_KEY = "not-needed"
+# ANTHROPIC_API_KEY = "your-api-key"
+# GEMINI_API_KEY = "your-api-key"
+
+# ---------------------------------------------------------------------------
+# Embedding — Ollama (nomic-embed-text aliased to openai/text-embedding-3-small)
+# ---------------------------------------------------------------------------
+[embedding]
+# nomic-embed-text (Ollama) outputs 768-dim vectors. The relaxed
+# validator in src/config.py (hermes-stack fork) accepts this when
+# vector_store.MIGRATED=true.
+VECTOR_DIMENSIONS = 768
+
+[embedding.model_config]
+transport = "openai"
+model = "openai/text-embedding-3-small"
+
+[embedding.model_config.overrides]
+base_url = "http://host.docker.internal:11434/v1"
+
+# ---------------------------------------------------------------------------
+# Deriver — observation extraction (runs every message, needs speed + tools)
+# ---------------------------------------------------------------------------
+[deriver]
+ENABLED = true
+WORKERS = 1
+POLLING_SLEEP_INTERVAL_SECONDS = 1.0
+STALE_SESSION_TIMEOUT_MINUTES = 5
+DEDUPLICATE = true
+MAX_INPUT_TOKENS = 8000
+WORKING_REPRESENTATION_MAX_OBSERVATIONS = 100
+REPRESENTATION_BATCH_MAX_TOKENS = 200
+FLUSH_ENABLED = true
+
+[deriver.model_config]
+transport = "openai"
+model = "bonsai-8b"
+max_output_tokens = 1500
+
+[deriver.model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+# ---------------------------------------------------------------------------
+# Dialectic — multi-level reasoning for peer.chat
+# ---------------------------------------------------------------------------
+[dialectic]
+MAX_OUTPUT_TOKENS = 8192
+MAX_INPUT_TOKENS = 100000
+HISTORY_TOKEN_LIMIT = 8192
+SESSION_HISTORY_MAX_TOKENS = 4096
+
+[dialectic.levels.minimal]
+MAX_TOOL_ITERATIONS = 1
+MAX_OUTPUT_TOKENS = 250
+
+[dialectic.levels.minimal.model_config]
+transport = "openai"
+model = "bonsai-8b"
+
+[dialectic.levels.minimal.model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+[dialectic.levels.low]
+MAX_TOOL_ITERATIONS = 5
+
+[dialectic.levels.low.model_config]
+transport = "openai"
+model = "bonsai-8b"
+
+[dialectic.levels.low.model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+[dialectic.levels.medium]
+MAX_TOOL_ITERATIONS = 2
+
+[dialectic.levels.medium.model_config]
+transport = "openai"
+model = "bonsai-8b"
+
+[dialectic.levels.medium.model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+[dialectic.levels.high]
+MAX_TOOL_ITERATIONS = 4
+
+[dialectic.levels.high.model_config]
+transport = "openai"
+model = "bonsai-8b"
+
+[dialectic.levels.high.model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+[dialectic.levels.max]
+MAX_TOOL_ITERATIONS = 10
+
+[dialectic.levels.max.model_config]
+transport = "openai"
+model = "bonsai-8b"
+
+[dialectic.levels.max.model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+# ---------------------------------------------------------------------------
+# Summary — session summarization
+# ---------------------------------------------------------------------------
+[summary]
+ENABLED = true
+MESSAGES_PER_SHORT_SUMMARY = 20
+MESSAGES_PER_LONG_SUMMARY = 60
+MAX_TOKENS_SHORT = 1000
+MAX_TOKENS_LONG = 4000
+
+[summary.model_config]
+transport = "openai"
+model = "bonsai-8b"
+
+[summary.model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+# ---------------------------------------------------------------------------
+# Dream — memory consolidation (runs rarely, needs best quality)
+# ---------------------------------------------------------------------------
+# Dream runs on Bonsai — the Neuromancer-derivative model fine-tuned for
+# memory reasoning. A general chat model (qwen3.5:9b, llama3.1, etc.)
+# fabricates facts during the consolidation tool-loop; Bonsai stays
+# disciplined. Dream fires only while the user is idle (Honcho cancels
+# pending dreams on new messages), so its CPU cost doesn't compete with
+# live deriver / dialectic turns.
+[dream]
+ENABLED = true
+DOCUMENT_THRESHOLD = 30
+IDLE_TIMEOUT_MINUTES = 10
+MIN_HOURS_BETWEEN_DREAMS = 1
+ENABLED_TYPES = ["omni"]
+MAX_TOOL_ITERATIONS = 3
+HISTORY_TOKEN_LIMIT = 8192
+
+[dream.deduction_model_config]
+transport = "openai"
+model = "bonsai-8b"
+
+[dream.deduction_model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+[dream.induction_model_config]
+transport = "openai"
+model = "bonsai-8b"
+
+[dream.induction_model_config.overrides]
+base_url = "http://host.docker.internal:8080/v1"
+
+[peer_card]
+ENABLED = true
+
+[vector_store]
+TYPE = "pgvector"
+DIMENSIONS = 768
+# MIGRATED=true tells the fork's relaxed validator that the schema has
+# already been flipped to 768-dim by the h8i9j0k1l2m3 migration — without
+# it, startup raises ValueError("must remain 1536 while migration is
+# incomplete").
+MIGRATED = true
+
+[metrics]
+ENABLED = false
+
+[telemetry]
+ENABLED = false
+
+[sentry]
+ENABLED = false
