@@ -71,6 +71,13 @@ async def publish_webhook_event(event: WebhookEvent) -> None:
                 task_type="webhook",
                 workspace_name=event.workspace_id,
                 message_id=None,  # Webhooks don't have a message_id
+                # Webhooks are system-originated (no user utterance to
+                # classify) — bypass the gatekeeper gate entirely. The
+                # gatekeeper daemon only processes task_type='representation'
+                # rows, so status='pending' on a webhook would strand it
+                # forever. Mirrors how dream / reconciler / summary enqueue
+                # with status='ready'.
+                status="ready",
             )
             db.add(queue_item)
             await db.commit()
