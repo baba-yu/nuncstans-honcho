@@ -210,7 +210,12 @@ def create_representation_record(
         "workspace_name": workspace_name,
         "message_id": message_id,
         # New representation items wait for the gatekeeper classifier before
-        # deriver picks them up. See migration g7h8i9j0k1l2 and sleep_daemon.
+        # deriver picks them up. See migration g7h8i9j0k1l2 and
+        # scripts/gatekeeper_daemon.py (managed by scripts/llama-services.sh).
+        # If gatekeeper is not running this WILL strand the queue — the
+        # polling loop in queue_manager.py only claims status IN
+        # ('ready','revived'). Run `./scripts/llama-services.sh status` and
+        # confirm "gk ... running" before posting messages.
         "status": "pending",
     }
 
