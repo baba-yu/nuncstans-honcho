@@ -1,19 +1,28 @@
-# Honcho config for the hermes-stack (gatekeeper fork) — Bonsai + local Ollama
+# Honcho config for the hermes-stack (gatekeeper fork) — Qwen3.6 single-engine
 #
 # Copy to config.toml before `docker compose up` (this file is tracked as a
 # template because upstream Honcho .gitignore-s config.toml).
 #
-#   cp config.toml.bonsai-example config.toml
+#   cp config.toml.hermes-example config.toml
 #
-# This template assumes the full hermes-stack deployment:
-#   * Bonsai-8B served via llama-server on host at :8080 (OpenAI-compat)
-#   * Ollama on host at :11434 for embeddings (nomic-embed-text aliased to
-#     `openai/text-embedding-3-small`)
-#   * 768-dim vector store (matches Nomic's output), enforced by the
+# This template targets the single-engine hermes-stack deployment documented
+# in ../README.md:
+#   * chat llama-server on host at :8080 (OpenAI-compat, alias
+#     "qwen3.6-test", serving Qwen3.6-35B-A3B with expert-tensor CPU offload
+#     and --reasoning off)
+#   * embedding llama-server on host at :8081 (OpenAI-compat, alias
+#     "openai/text-embedding-3-small", serving nomic-embed-text)
+#   * 768-dim vector store (matches nomic's output), enforced by the
 #     `h8i9j0k1l2m3` migration that follows upstream's Vector(1536) creation
-#   * No external cloud LLM fallback — each [X.model_config] points at Bonsai
-#     via `overrides.base_url`, and OPENAI_API_KEY is set to the placeholder
-#     "not-needed" (llama-server ignores the value but refuses empty strings)
+#   * No external cloud LLM fallback — each [X.model_config] points at the
+#     local chat server via `overrides.base_url`, and OPENAI_API_KEY is set
+#     to the placeholder "not-needed" (llama-server ignores the value but
+#     refuses empty strings)
+#
+# Both llama-server processes are managed by ../scripts/llama-services.sh
+# (start / stop / status / restart / logs). The legacy two-endpoint
+# Bonsai+Ollama design this replaced is archived in
+# ../experiments/bonsai-archive.md.
 #
 # Upstream moved LLM settings from flat `[deriver] PROVIDER/MODEL` fields to
 # nested `[X.model_config]` sub-tables with `transport` / `model` keys, plus
@@ -21,11 +30,12 @@
 # This file uses the new schema.
 #
 # Hyperparameters tuned for the hermes-stack use-case — see
-# `hermes-stack/README.md` "Critical hyperparameters" for rationale:
+# `../README.md` "Critical Honcho hyperparameters" for rationale:
 #   * REPRESENTATION_BATCH_MAX_TOKENS = 200 + FLUSH_ENABLED = true so that
 #     short chat turns fire the gatekeeper/deriver pipeline
-#   * MAX_EMBEDDING_TOKENS = 2048 to match Nomic's native context
-#   * MAX_INPUT_TOKENS / MAX_OUTPUT_TOKENS sized for Bonsai's 16k KV cache
+#   * [embedding] MAX_INPUT_TOKENS = 2048 to match Nomic's native context
+#   * [deriver] MAX_INPUT_TOKENS / [deriver.model_config] max_output_tokens
+#     sized for tool-loop behavior against the qwen3.6 chat server
 
 [app]
 LOG_LEVEL = "INFO"
@@ -34,7 +44,6 @@ GET_CONTEXT_MAX_TOKENS = 100000
 MAX_FILE_SIZE = 5242880
 MAX_MESSAGE_SIZE = 25000
 EMBED_MESSAGES = true
-MAX_EMBEDDING_TOKENS = 2048
 NAMESPACE = "honcho"
 
 [db]
@@ -57,7 +66,7 @@ DEFAULT_TTL_SECONDS = 300
 # LLM
 #   llama-server requires a non-empty OPENAI_API_KEY even though it ignores
 #   the value. The per-module `overrides.base_url` points each subsystem at
-#   the Bonsai/Ollama endpoints on the host.
+#   the local llama-server endpoints on the host.
 # ---------------------------------------------------------------------------
 [llm]
 DEFAULT_MAX_TOKENS = 2500
@@ -66,23 +75,25 @@ OPENAI_API_KEY = "not-needed"
 # GEMINI_API_KEY = "your-api-key"
 
 # ---------------------------------------------------------------------------
-# Embedding — Ollama (nomic-embed-text aliased to openai/text-embedding-3-small)
+# Embedding — embed llama-server (:8081) serving nomic-embed-text
 # ---------------------------------------------------------------------------
 [embedding]
-# nomic-embed-text (Ollama) outputs 768-dim vectors. The relaxed
-# validator in src/config.py (hermes-stack fork) accepts this when
-# vector_store.MIGRATED=true.
+# nomic-embed-text outputs 768-dim vectors. The relaxed validator in
+# src/config.py (hermes-stack fork) accepts this when vector_store.MIGRATED=true.
 VECTOR_DIMENSIONS = 768
+# Match nomic-embed-text's 2048-token native context so the chunker splits
+# longer messages before they reach the embedding server.
+MAX_INPUT_TOKENS = 2048
 
 [embedding.model_config]
 transport = "openai"
 model = "openai/text-embedding-3-small"
 
 [embedding.model_config.overrides]
-base_url = "http://host.docker.internal:11434/v1"
+base_url = "http://host.docker.internal:8081/v1"
 
 # ---------------------------------------------------------------------------
-# Deriver — observation extraction (runs every message, needs speed + tools)
+# Deriver — observation extraction (runs every message, needs tool reliability)
 # ---------------------------------------------------------------------------
 [deriver]
 ENABLED = true
@@ -97,7 +108,7 @@ FLUSH_ENABLED = true
 
 [deriver.model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 max_output_tokens = 1500
 
 [deriver.model_config.overrides]
@@ -118,7 +129,7 @@ MAX_OUTPUT_TOKENS = 250
 
 [dialectic.levels.minimal.model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 
 [dialectic.levels.minimal.model_config.overrides]
 base_url = "http://host.docker.internal:8080/v1"
@@ -128,7 +139,7 @@ MAX_TOOL_ITERATIONS = 5
 
 [dialectic.levels.low.model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 
 [dialectic.levels.low.model_config.overrides]
 base_url = "http://host.docker.internal:8080/v1"
@@ -138,7 +149,7 @@ MAX_TOOL_ITERATIONS = 2
 
 [dialectic.levels.medium.model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 
 [dialectic.levels.medium.model_config.overrides]
 base_url = "http://host.docker.internal:8080/v1"
@@ -148,7 +159,7 @@ MAX_TOOL_ITERATIONS = 4
 
 [dialectic.levels.high.model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 
 [dialectic.levels.high.model_config.overrides]
 base_url = "http://host.docker.internal:8080/v1"
@@ -158,7 +169,7 @@ MAX_TOOL_ITERATIONS = 10
 
 [dialectic.levels.max.model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 
 [dialectic.levels.max.model_config.overrides]
 base_url = "http://host.docker.internal:8080/v1"
@@ -175,20 +186,17 @@ MAX_TOKENS_LONG = 4000
 
 [summary.model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 
 [summary.model_config.overrides]
 base_url = "http://host.docker.internal:8080/v1"
 
 # ---------------------------------------------------------------------------
-# Dream — memory consolidation (runs rarely, needs best quality)
+# Dream — memory consolidation (runs rarely)
 # ---------------------------------------------------------------------------
-# Dream runs on Bonsai — the Neuromancer-derivative model fine-tuned for
-# memory reasoning. A general chat model (qwen3.5:9b, llama3.1, etc.)
-# fabricates facts during the consolidation tool-loop; Bonsai stays
-# disciplined. Dream fires only while the user is idle (Honcho cancels
-# pending dreams on new messages), so its CPU cost doesn't compete with
-# live deriver / dialectic turns.
+# Dream runs on the same chat llama-server as the live Hermes / deriver /
+# dialectic paths. Concurrency doesn't matter because dream only fires
+# while the user is idle — Honcho cancels pending dreams on new messages.
 [dream]
 ENABLED = true
 DOCUMENT_THRESHOLD = 30
@@ -200,14 +208,14 @@ HISTORY_TOKEN_LIMIT = 8192
 
 [dream.deduction_model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 
 [dream.deduction_model_config.overrides]
 base_url = "http://host.docker.internal:8080/v1"
 
 [dream.induction_model_config]
 transport = "openai"
-model = "bonsai-8b"
+model = "qwen3.6-test"
 
 [dream.induction_model_config.overrides]
 base_url = "http://host.docker.internal:8080/v1"

@@ -23,13 +23,13 @@
 > - Status-aware queue filter in `src/deriver/queue_manager.py` — only `status IN ('ready','revived')` rows are picked up
 > - Relaxed vector-dim validator in `src/config.py` — upstream forbids any `EMBEDDING.VECTOR_DIMENSIONS != 1536` under pgvector; the fork accepts non-1536 dims once `vector_store.MIGRATED=true` is set (needed for 768-dim Nomic embeddings)
 >
-> **Before first `docker compose up`:** copy the Bonsai-tuned config template:
+> **Before first `docker compose up`:** copy the hermes-stack config template:
 > ```bash
-> cp config.toml.bonsai-example config.toml
+> cp config.toml.hermes-example config.toml
 > ```
-> This is required because upstream Honcho's `.gitignore` excludes `config.toml` (it's meant to be per-deployment). The `config.toml.bonsai-example` file is tracked in this fork as the canonical hermes-stack starting point (Bonsai-8B primary, no cloud fallback, `FLUSH_ENABLED=true`, `REPRESENTATION_BATCH_MAX_TOKENS=200`, 768-dim vectors).
+> This is required because upstream Honcho's `.gitignore` excludes `config.toml` (it's meant to be per-deployment). The `config.toml.hermes-example` file is tracked in this fork as the canonical hermes-stack starting point (Qwen3.6-35B served by llama-server on `:8080`, nomic-embed-text on `:8081`, no cloud fallback, `FLUSH_ENABLED=true`, `REPRESENTATION_BATCH_MAX_TOKENS=200`, 768-dim vectors). The older Bonsai-8B + Ollama two-endpoint template is archived — see [hermes-stack/experiments/bonsai-archive.md](../../experiments/bonsai-archive.md) for that recipe and why it was retired.
 >
-> See the surrounding [hermes-stack](../../) repo for the full deployment story (Bonsai build, Ollama embedding alias, hermes agent wiring).
+> See the surrounding [hermes-stack](../../) repo for the full deployment story (llama-server build, GGUF fetch, hermes agent wiring).
 
 Honcho is an open source memory library with a managed service for building stateful
 agents. Use it with any model, framework, or architecture. It enables agents to build
