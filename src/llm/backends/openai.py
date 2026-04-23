@@ -309,6 +309,13 @@ class OpenAIBackend:
         if tools:
             params["tools"] = self._convert_tools(tools)
             if tool_choice is not None:
+                # OpenAI's spec accepts "none" | "auto" | "required" | {type:"function",...}.
+                # Honcho normalizes to "any"/"required" internally (Anthropic-style),
+                # but passing "any" to OpenAI-compatible servers like llama.cpp returns
+                # 400 invalid_request_error. Map to the spec-compliant value here so
+                # self-hosted backends accept the request.
+                if tool_choice == "any":
+                    tool_choice = "required"
                 params["tool_choice"] = tool_choice
         if extra_params:
             for key in (

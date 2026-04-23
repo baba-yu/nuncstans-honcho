@@ -13,7 +13,7 @@
 [![NPM version](https://img.shields.io/npm/v/@honcho-ai/sdk.svg)](https://npmjs.org/package/@honcho-ai/sdk)
 [![Discord](https://img.shields.io/discord/1016845111637839922?style=flat&logo=discord&logoColor=23ffffff&label=Plastic%20Labs&labelColor=235865F2)](https://discord.gg/honcho)
 
-> **⚠️ This is `baba-yu/nunc-honcho`, a hermes-stack fork of `plastic-labs/honcho`.**
+> **⚠️ This is `baba-yu/nuncstans-honcho`, a hermes-stack fork of `plastic-labs/honcho`.**
 >
 > Local modifications on top of upstream:
 > - Gatekeeper classifier columns (`queue.status`, `queue.gate_verdict`, etc.) — new migration `g7h8i9j0k1l2`
