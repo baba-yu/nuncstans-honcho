@@ -84,7 +84,8 @@
                 "group": "Reference",
                 "pages": [
                   "v3/documentation/reference/platform",
-                  "v3/documentation/reference/sdk"
+                  "v3/documentation/reference/sdk",
+                  "v3/documentation/reference/cli"
                 ]
               }
             ]
@@ -102,6 +103,7 @@
                 "group": "Integrations",
                 "pages": [
                   "v3/guides/integrations/claude-code",
+                  "v3/guides/integrations/opencode",
                   "v3/guides/integrations/crewai",
                   "v3/guides/integrations/langgraph",
                   "v3/guides/integrations/mcp",
