@@ -2,9 +2,19 @@ services:
   api:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    # Bind-mount the host config.toml onto the image-baked copy.
+    # Upstream's Dockerfile bakes honcho/config.toml into /app/config.toml at
+    # build time, so edits to the host file never reached the container — any
+    # switch-endpoints.py change to endpoints / models was silently ignored by
+    # the deriver and dialectic paths. The ro mount lets `docker compose up -d
+    # --force-recreate` pick up config.toml changes without a rebuild.
+    volumes:
+      - ./config.toml:/app/config.toml:ro
   deriver:
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    volumes:
+      - ./config.toml:/app/config.toml:ro
   database:
     ports: !reset []
   redis:
